@@ -86,7 +86,7 @@ app.add_middleware(
     # public position/TLE data cross-origin, so we allow any origin here.
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["*"],   # GET (tracker/positions) + POST (mobile on-demand recompute)
     allow_headers=["*"],
 )
 
