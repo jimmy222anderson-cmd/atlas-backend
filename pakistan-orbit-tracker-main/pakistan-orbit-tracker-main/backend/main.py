@@ -1681,15 +1681,22 @@ def _recompute_forecast():
         import forecast_15day as _fc
         _fc.run(force_refresh_tles=True, render_doc=False)   # writes forecast_15day.json (~3-8 min)
         summary = forecast_summary()
-        gate = os.getenv("GATE_URL", "").rstrip("/")
-        key = os.getenv("ADMIN_KEY", "")
+        # .strip() guards against a trailing newline/space that the Render env
+        # var may have picked up (e.g. copied from `type file`), which would make
+        # the gate reject the admin key.
+        gate = os.getenv("GATE_URL", "").strip().rstrip("/")
+        key = os.getenv("ADMIN_KEY", "").strip()
         if gate and key:
             try:
-                httpx.post(gate + "/update",
-                           headers={"X-Admin-Key": key, "Content-Type": "application/json"},
-                           content=json.dumps(summary), timeout=90.0)
+                r = httpx.post(gate + "/update",
+                               headers={"X-Admin-Key": key, "Content-Type": "application/json"},
+                               content=json.dumps(summary), timeout=90.0)
+                if r.status_code != 200:
+                    _REFRESH["error"] = "gate returned %s: %s" % (r.status_code, r.text[:100])
             except Exception as e:
                 _REFRESH["error"] = "gate push failed: " + str(e)[:120]
+        else:
+            _REFRESH["error"] = "GATE_URL/ADMIN_KEY not set on the server"
         _REFRESH["generated_at"] = summary.get("generated_at")
     except Exception as e:
         _REFRESH["error"] = str(e)[:200]
