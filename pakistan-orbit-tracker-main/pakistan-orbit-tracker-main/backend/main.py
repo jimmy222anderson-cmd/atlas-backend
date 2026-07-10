@@ -1665,6 +1665,53 @@ def mobile_summary(authorization: str = Header(default="")):
     return forecast_summary()
 
 
+# ── On-demand forecast recompute (mobile "Refresh Forecast") ──────────────────
+# The phone triggers this; it runs the full 15-day forecast in a background
+# thread (~3-8 min), rebuilds the summary, and pushes it to the Cloudflare gate
+# so every client picks up the fresh data. The app polls /refresh_status and
+# shows a live "Generating… Xs" counter meanwhile.
+import threading as _threading
+_REFRESH = {"running": False, "started_at": 0.0, "generated_at": None, "error": None}
+
+def _recompute_forecast():
+    try:
+        _REFRESH.update(running=True, error=None, started_at=time.time())
+        if _SAT_DIR not in sys.path:
+            sys.path.insert(0, _SAT_DIR)
+        import forecast_15day as _fc
+        _fc.run(force_refresh_tles=True, render_doc=False)   # writes forecast_15day.json (~3-8 min)
+        summary = forecast_summary()
+        gate = os.getenv("GATE_URL", "").rstrip("/")
+        key = os.getenv("ADMIN_KEY", "")
+        if gate and key:
+            try:
+                httpx.post(gate + "/update",
+                           headers={"X-Admin-Key": key, "Content-Type": "application/json"},
+                           content=json.dumps(summary), timeout=90.0)
+            except Exception as e:
+                _REFRESH["error"] = "gate push failed: " + str(e)[:120]
+        _REFRESH["generated_at"] = summary.get("generated_at")
+    except Exception as e:
+        _REFRESH["error"] = str(e)[:200]
+    finally:
+        _REFRESH["running"] = False
+
+@app.post("/api/mobile/refresh", include_in_schema=False)
+def mobile_refresh(authorization: str = Header(default="")):
+    """Kick off a fresh 15-day forecast in the background. Returns immediately."""
+    _check_basic(authorization)
+    if not _REFRESH["running"]:
+        _threading.Thread(target=_recompute_forecast, daemon=True).start()
+    return {"started": True, "running": _REFRESH["running"]}
+
+@app.get("/api/mobile/refresh_status", include_in_schema=False)
+def mobile_refresh_status(authorization: str = Header(default="")):
+    _check_basic(authorization)
+    el = int(time.time() - _REFRESH["started_at"]) if _REFRESH["running"] and _REFRESH["started_at"] else None
+    return {"running": _REFRESH["running"], "elapsed_s": el,
+            "generated_at": _REFRESH["generated_at"], "error": _REFRESH["error"]}
+
+
 # ── Intel-theme dashboard (self-contained HTML that fetches the summary above) ──
 def _intel_html_path() -> Path:
     """dashboard_ui/ lives next to Satellite_Tracker at the project root, and is

@@ -1,2 +1,3 @@
 __pycache__/
 *.pyc
+Satellite_Tracker/forecast_15day.json
