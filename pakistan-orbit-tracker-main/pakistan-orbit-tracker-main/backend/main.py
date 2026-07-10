@@ -1062,6 +1062,9 @@ async def _warm_hires_eo_cache_on_startup():
 # once. With it, the first caller fills the cache and the rest find it warm.
 import asyncio as _asyncio
 _hires_eo_mirror_lock = _asyncio.Lock()
+# True while a background bulk-mirror repopulate is running, so we trigger it
+# exactly once instead of blocking every gathered caller on the download.
+_hires_eo_mirror_inflight = False
 
 
 async def _fetch_hires_eo_tle(norad: str) -> tuple[str, str] | None:
@@ -1103,18 +1106,29 @@ async def _fetch_hires_eo_tle(norad: str) -> tuple[str, str] | None:
     except Exception:
         pass
 
-    # Cache miss — repopulate from the bulk mirror once. The lock makes the
-    # 48 parallel callers serialise: the first does the download, the rest
-    # re-check and find the cache already warm.
-    async with _hires_eo_mirror_lock:
-        cached = _hires_eo_tle_cache.get(norad)
-        if cached and time.time() - cached["fetched_at"] < _HIRES_EO_TLE_TTL:
-            return cached["line1"], cached["line2"]
-        if not _hires_eo_tle_cache or all(
+    # Cache miss — kick off a SINGLE background repopulate from the bulk mirror
+    # and return immediately. Awaiting the ~15-20 s mirror download HERE, inside
+    # the whole-fleet asyncio.gather, serialises 370+ coroutines behind one slow
+    # network call and starves the single free-tier worker until the request
+    # times out — that is the "Loading TLE data…" hang. The tracker re-polls
+    # every few seconds and picks up the now-warm cache.
+    global _hires_eo_mirror_inflight
+    if not _hires_eo_mirror_inflight and (
+        not _hires_eo_tle_cache or all(
             time.time() - e["fetched_at"] >= _HIRES_EO_TLE_TTL
             for e in _hires_eo_tle_cache.values()
-        ):
-            await _populate_hires_eo_cache_from_mirror()
+        )
+    ):
+        _hires_eo_mirror_inflight = True
+        async def _bg_mirror():
+            try:
+                await _populate_hires_eo_cache_from_mirror()
+            finally:
+                globals()["_hires_eo_mirror_inflight"] = False
+        try:
+            _asyncio.get_running_loop().create_task(_bg_mirror())
+        except RuntimeError:
+            _hires_eo_mirror_inflight = False
     cached = _hires_eo_tle_cache.get(norad)
     if cached:
         return cached["line1"], cached["line2"]
