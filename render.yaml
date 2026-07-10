@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: atlas-backend
+    runtime: python
+    plan: free
+    rootDir: pakistan-orbit-tracker-main/pakistan-orbit-tracker-main/backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"

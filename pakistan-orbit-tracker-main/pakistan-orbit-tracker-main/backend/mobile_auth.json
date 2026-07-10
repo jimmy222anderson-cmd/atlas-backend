@@ -1,0 +1,5 @@
+{
+  "_comment": "Single login for the ATLAS mobile app. CHANGE these before deploying. Later this becomes a multi-user list.",
+  "id": "atlas",
+  "password": "Hamza@123"
+}
