@@ -10,7 +10,7 @@ import math
 from functools import lru_cache
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -1745,6 +1745,69 @@ def mobile_refresh_status(authorization: str = Header(default="")):
     el = int(time.time() - _REFRESH["started_at"]) if _REFRESH["running"] and _REFRESH["started_at"] else None
     return {"running": _REFRESH["running"], "elapsed_s": el,
             "generated_at": _REFRESH["generated_at"], "error": _REFRESH["error"]}
+
+
+# ── Custom-AOI coverage (draw any polygon → its own 15-day blind-time) ─────────
+# Real SGP4 over the polygon via the shared Satellite_Tracker/aoi_forecast engine.
+# Runs in a background thread (~1-2 min for 15 days) and the app polls status.
+_AOI = {"running": False, "started_at": 0.0, "result": None, "error": None}
+
+def _aoi_fleet():
+    """Build the ≤3 m fleet as {name,norad,sensor,resolution_m,country,line1,line2}
+    from the forecast TLE cache (same source the Pakistan forecast uses)."""
+    with open(_forecast_tle_cache_path(), "r", encoding="utf-8") as f:
+        d = json.load(f)
+    sats = []
+    for k, v in d.items():
+        if not isinstance(v, dict) or not v.get("line1") or not v.get("line2"):
+            continue
+        r = v.get("resolution_m")
+        if r is not None and r > (MAX_RESOLUTION_M or 3.0):
+            continue
+        sats.append({"name": v.get("name"), "norad": str(k), "sensor": v.get("sensor"),
+                     "resolution_m": r, "country": v.get("country"),
+                     "line1": v["line1"], "line2": v["line2"]})
+    return sats
+
+def _compute_aoi_job(poly, days):
+    try:
+        _AOI.update(running=True, error=None, result=None, started_at=time.time())
+        if _SAT_DIR not in sys.path:
+            sys.path.insert(0, _SAT_DIR)
+        import aoi_forecast as _aoi
+        sats = _aoi_fleet()
+        _AOI["result"] = _aoi.compute_aoi_forecast(poly, sats, days=days)
+    except Exception as e:
+        _AOI["error"] = str(e)[:200]
+    finally:
+        _AOI["running"] = False
+
+@app.post("/api/aoi/compute", include_in_schema=False)
+def aoi_compute(payload: dict = Body(...), authorization: str = Header(default="")):
+    """Body: {polygon:[[lat,lon],...], days:15}. Kicks off a background AOI job."""
+    _check_basic(authorization)
+    poly = payload.get("polygon") or []
+    days = int(payload.get("days", 15) or 15)
+    if not isinstance(poly, list) or len(poly) < 3:
+        raise HTTPException(400, detail="polygon needs at least 3 [lat,lon] points")
+    days = max(1, min(15, days))
+    if not _AOI["running"]:
+        _threading.Thread(target=_compute_aoi_job, args=(poly, days), daemon=True).start()
+    return {"started": True, "running": _AOI["running"]}
+
+@app.get("/api/aoi/status", include_in_schema=False)
+def aoi_status(authorization: str = Header(default="")):
+    _check_basic(authorization)
+    el = int(time.time() - _AOI["started_at"]) if _AOI["running"] and _AOI["started_at"] else None
+    return {"running": _AOI["running"], "elapsed_s": el,
+            "ready": _AOI["result"] is not None, "error": _AOI["error"]}
+
+@app.get("/api/aoi/result", include_in_schema=False)
+def aoi_result(authorization: str = Header(default="")):
+    _check_basic(authorization)
+    if _AOI["result"] is None:
+        raise HTTPException(404, detail="no AOI result yet")
+    return _AOI["result"]
 
 
 # ── Intel-theme dashboard (self-contained HTML that fetches the summary above) ──
