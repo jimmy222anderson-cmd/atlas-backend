@@ -5,7 +5,7 @@ import re
 import sys
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import math
 from functools import lru_cache
 
@@ -1526,7 +1526,9 @@ def forecast_summary():
     COUNTRIES = ["China", "USA", "India", "Israel", "Other"]
     cty = {k: {"sats": set(), "optset": set(), "sarset": set(), "milset": set(), "daily": []} for k in COUNTRIES}
     days_out = []
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _now_dt = datetime.now(timezone.utc)
+    now_utc = _now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    horizon_utc = (_now_dt + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")  # next-24h window
     upcoming = []
 
     for day in fc.get("days", []):
@@ -1562,8 +1564,8 @@ def forecast_summary():
             if is_sar(c.get("sensor")): cty[g]["sarset"].add(nid)
             elif is_mil(c.get("sensor")): cty[g]["milset"].add(nid)
             else: cty[g]["optset"].add(nid)
-            # upcoming: future entries only, keep a bounded list
-            if c.get("entry_utc", "") >= now_utc and len(upcoming) < 60:
+            # upcoming: every pass whose entry is within the next 24 h
+            if now_utc <= c.get("entry_utc", "") <= horizon_utc and len(upcoming) < 400:
                 upcoming.append({
                     "name": c.get("name"), "country": c.get("country"),
                     "sensor": "SAR" if is_sar(c.get("sensor")) else ("MIL" if is_mil(c.get("sensor")) else "OPT"),
@@ -1597,7 +1599,7 @@ def forecast_summary():
         "generated_at": fc.get("generated_at"),
         "start_date": fc.get("start_date"), "end_date": fc.get("end_date"),
         "satellite_count": fc.get("satellite_count"),
-        "days": days_out, "countries": cty, "upcoming": upcoming[:48],
+        "days": days_out, "countries": cty, "upcoming": upcoming[:300],
     }
 
 
