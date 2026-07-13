@@ -20,7 +20,15 @@ from datetime import timezone, timedelta
 
 # Reuse the exact SGP4 propagation the Pakistan engine uses, so AOI numbers are
 # consistent with the main forecast.
-from forecast_15day import propagate, STEP_SECONDS
+from forecast_15day import propagate
+
+# Two-phase scan: a cheap COARSE pass locates when a satellite is near the AOI
+# (its wide tilt bbox is reliably caught at 2-min steps), then a FINE pass only
+# inside those brief windows accurately detects overhead + entry/exit. This is
+# as accurate as a pure 15 s scan but a fraction of the SGP4 work — a small AOI's
+# overhead pass lasts only ~25 s, so a coarse-only scan would miss it.
+COARSE_SEC = 90
+FINE_SEC = 15
 
 # Tilt buffer around the polygon (an optical sensor can slew off-nadir ~300 km).
 # ~2.7° lat / 3.1° lon at ~30°N, matching the Pakistan engine's default.
@@ -55,61 +63,68 @@ def _sat_day_passes(line1: str, line2: str, day: datetime.date,
                     poly: list[list[float]], bbox: tuple) -> list[dict]:
     """All overhead / tilt-range arcs for one satellite over one PKT day."""
     lat_min, lat_max, lon_min, lon_max = bbox
+    tb_lat0, tb_lat1 = lat_min - TILT_BUF_LAT, lat_max + TILT_BUF_LAT
+    tb_lon0, tb_lon1 = lon_min - TILT_BUF_LON, lon_max + TILT_BUF_LON
     # PKT day = UTC window shifted back 5 h (same convention as forecast_15day).
     start = (datetime.datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
              - timedelta(hours=5))
     end = start + timedelta(days=1)
-    step = timedelta(seconds=STEP_SECONDS)
 
-    passes: list[dict] = []
-    in_arc = False
-    entry_t = None
-    arc_over = False
-    max_alt = 0.0
+    def _in_tilt(lat, lon):
+        return tb_lat0 <= lat <= tb_lat1 and tb_lon0 <= lon <= tb_lon1
 
-    def _close(t_end):
-        nonlocal in_arc, arc_over, max_alt, entry_t
-        if entry_t is not None:
-            passes.append({
-                "entry": entry_t, "exit": t_end,
-                "type": "overhead" if arc_over else "tilt-range",
-                "max_alt_km": round(max_alt, 1),
-            })
-        in_arc = False
-        arc_over = False
-        max_alt = 0.0
-        entry_t = None
-
+    # ── Phase 1: coarse scan → candidate near-AOI windows ────────────────────
+    coarse = timedelta(seconds=COARSE_SEC)
+    hits = []
     t = start
     while t <= end:
         pos = propagate(line1, line2, t)
-        if pos is None:
-            if in_arc:
-                _close(t)
-            t += step
-            continue
-        lat, lon, alt = pos
-        in_tilt = (lat_min - TILT_BUF_LAT <= lat <= lat_max + TILT_BUF_LAT and
-                   lon_min - TILT_BUF_LON <= lon <= lon_max + TILT_BUF_LON)
-        over = point_in_poly(lat, lon, poly) if in_tilt else False
-        if in_tilt:
-            if not in_arc:
-                in_arc = True
-                entry_t = t
-                arc_over = False
-                max_alt = 0.0
-            if over:
-                arc_over = True
-            if alt > max_alt:
-                max_alt = alt
-            t += step
-        elif in_arc:
-            _close(t)
-            t += step
+        if pos and _in_tilt(pos[0], pos[1]):
+            hits.append(t)
+        t += coarse
+    if not hits:
+        return []
+    ranges = []
+    for w in hits:
+        s, e = w - coarse, w + coarse
+        if ranges and s <= ranges[-1][1]:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], e))
         else:
-            t += step
-    if in_arc:
-        _close(end)
+            ranges.append((s, e))
+
+    # ── Phase 2: fine scan inside each window → accurate arcs ────────────────
+    fine = timedelta(seconds=FINE_SEC)
+    passes: list[dict] = []
+    for rs, re in ranges:
+        in_arc = False
+        entry_t = None
+        arc_over = False
+        max_alt = 0.0
+        t = max(rs, start)
+        rend = min(re, end)
+        while t <= rend:
+            pos = propagate(line1, line2, t)
+            if pos is None:
+                t += fine
+                continue
+            lat, lon, alt = pos
+            if _in_tilt(lat, lon):
+                if not in_arc:
+                    in_arc, entry_t, arc_over, max_alt = True, t, False, 0.0
+                if point_in_poly(lat, lon, poly):
+                    arc_over = True
+                if alt > max_alt:
+                    max_alt = alt
+            elif in_arc:
+                passes.append({"entry": entry_t, "exit": t,
+                               "type": "overhead" if arc_over else "tilt-range",
+                               "max_alt_km": round(max_alt, 1)})
+                in_arc = False
+            t += fine
+        if in_arc:
+            passes.append({"entry": entry_t, "exit": rend,
+                           "type": "overhead" if arc_over else "tilt-range",
+                           "max_alt_km": round(max_alt, 1)})
     return passes
 
 
@@ -154,6 +169,23 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
     bbox = poly_bbox(poly)
     if start_date is None:
         start_date = (datetime.datetime.now(timezone.utc) + timedelta(hours=5)).date()
+
+    # Inclination cull: a satellite of inclination i only reaches latitudes up to
+    # ±(i if i<=90 else 180-i). If it can't even reach the AOI's nearest-equator
+    # edge (minus the tilt buffer), its ground track never enters — skip it. This
+    # drops the whole SGP4 loop for those sats (big win for a mid/high-lat AOI).
+    aoi_min_abs_lat = min(abs(bbox[0]), abs(bbox[1])) - TILT_BUF_LAT
+    fleet = []
+    for s in sats:
+        try:
+            inc = float(str(s["line2"])[8:16])
+            reach = inc if inc <= 90 else (180.0 - inc)
+            if reach + 1.0 < aoi_min_abs_lat:
+                continue
+        except Exception:
+            pass  # unparsable → keep it (safer than dropping)
+        fleet.append(s)
+    sats = fleet
 
     out_days = []
     for di in range(days):
