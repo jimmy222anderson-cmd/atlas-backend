@@ -1564,8 +1564,9 @@ def forecast_summary():
             if is_sar(c.get("sensor")): cty[g]["sarset"].add(nid)
             elif is_mil(c.get("sensor")): cty[g]["milset"].add(nid)
             else: cty[g]["optset"].add(nid)
-            # upcoming: every pass whose entry is within the next 24 h
-            if now_utc <= c.get("entry_utc", "") <= horizon_utc and len(upcoming) < 400:
+            # upcoming: every pass whose entry is within the next 24 h (deduped
+            # to one row per satellite below, so this holds all raw passes first)
+            if now_utc <= c.get("entry_utc", "") <= horizon_utc and len(upcoming) < 3000:
                 upcoming.append({
                     "name": c.get("name"), "country": c.get("country"),
                     "sensor": "SAR" if is_sar(c.get("sensor")) else ("MIL" if is_mil(c.get("sensor")) else "OPT"),
@@ -1592,6 +1593,17 @@ def forecast_summary():
         })
 
     upcoming.sort(key=lambda u: u.get("entry_utc") or "")
+    # One row per satellite: keep each sat's soonest pass in the next 24 h, so the
+    # list is "every satellite due overhead" rather than repeated passes.
+    _seen_norad = set()
+    _uniq_upcoming = []
+    for _u in upcoming:
+        _nid = _u.get("norad_id")
+        if _nid in _seen_norad:
+            continue
+        _seen_norad.add(_nid)
+        _uniq_upcoming.append(_u)
+    upcoming = _uniq_upcoming
     cty = {k: {"sats": len(v["sats"]), "opt": len(v["optset"]), "sar": len(v["sarset"]),
                "mil": len(v["milset"]), "daily": v["daily"]} for k, v in cty.items()}
 
@@ -1599,7 +1611,7 @@ def forecast_summary():
         "generated_at": fc.get("generated_at"),
         "start_date": fc.get("start_date"), "end_date": fc.get("end_date"),
         "satellite_count": fc.get("satellite_count"),
-        "days": days_out, "countries": cty, "upcoming": upcoming[:300],
+        "days": days_out, "countries": cty, "upcoming": upcoming[:400],
     }
 
 
