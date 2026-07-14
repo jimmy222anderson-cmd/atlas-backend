@@ -1517,6 +1517,13 @@ def forecast_summary(lean: int = Query(0)):
     counts (india/other/optical/sar/military), blind minutes + longest gap, and
     per-sensor OBSERVED windows (PKT minutes) for the OPT/SAR blind calendar;
     plus per-country daily counts, an 'upcoming' pass list, and fleet totals."""
+    # When called internally as forecast_summary() (e.g. the recompute push),
+    # `lean` is FastAPI's Query(0) FieldInfo, which is truthy — coerce to a real
+    # int so the default means FULL (with `sched`), not the lean copy.
+    try:
+        lean = int(lean)
+    except (TypeError, ValueError):
+        lean = 0
     # Cache the aggregated summary keyed by the forecast file's mtime: reading +
     # re-aggregating the large forecast_15day.json on EVERY request was the 3-5 s
     # "refresh" cost. Now it recomputes only when the forecast actually changes.
