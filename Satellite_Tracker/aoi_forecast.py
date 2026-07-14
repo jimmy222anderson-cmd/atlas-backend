@@ -58,6 +58,23 @@ def poly_bbox(poly: list[list[float]]) -> tuple[float, float, float, float]:
     return min(lats), max(lats), min(lons), max(lons)
 
 
+# Drop TLEs older than this — SGP4 drift beyond ~2 weeks makes positions
+# untrustworthy, which silently corrupts coverage. (FEAT: TLE freshness guard.)
+MAX_TLE_AGE_DAYS = 14.0
+
+
+def tle_age_days(line1: str, ref: datetime.datetime | None = None) -> float | None:
+    """Age (days) of a TLE from its epoch (line1 cols 18-32, YYDDD.dddd)."""
+    try:
+        yy = int(line1[18:20]); doy = float(line1[20:32])
+        yr = 2000 + yy if yy < 57 else 1900 + yy
+        epoch = datetime.datetime(yr, 1, 1, tzinfo=timezone.utc) + timedelta(days=doy - 1)
+        now = ref or datetime.datetime.now(timezone.utc)
+        return (now - epoch).total_seconds() / 86400.0
+    except Exception:
+        return None
+
+
 # ── pass detection over the polygon ──────────────────────────────────────────
 def _sat_day_passes(line1: str, line2: str, day: datetime.date,
                     poly: list[list[float]], bbox: tuple,
@@ -177,6 +194,22 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
     if start_date is None:
         start_date = (datetime.datetime.now(timezone.utc) + timedelta(hours=5)).date()
 
+    # TLE freshness guard: drop satellites whose TLE is too old to trust (SGP4
+    # drift), so stale elements don't quietly corrupt the coverage numbers.
+    _ages = []
+    _fresh = []
+    _stale_dropped = 0
+    for s in sats:
+        age = tle_age_days(str(s.get("line1", "")))
+        if age is not None:
+            _ages.append(age)
+            if age > MAX_TLE_AGE_DAYS:
+                _stale_dropped += 1
+                continue
+        _fresh.append(s)
+    sats = _fresh
+    _median_age = round(sorted(_ages)[len(_ages) // 2], 1) if _ages else None
+
     # Per-satellite tilt buffer (its standoff_km → degrees). A high-tilt sat can
     # image the AOI from far off its ground track (e.g. 500 km).
     buf_map = {}
@@ -274,10 +307,12 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
 
     return {
         "aoi": poly,
-        "engine": "aoi-v3-persat-tilt+daylight",   # version marker to confirm deploy
+        "engine": "aoi-v4-tle-fresh",              # version marker to confirm deploy
         "generated_at": datetime.datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "days": out_days,
         "satellite_count": len(sats),
+        "tle_median_age_days": _median_age,
+        "tle_stale_dropped": _stale_dropped,
     }
 
 

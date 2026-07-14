@@ -1383,6 +1383,31 @@ _SAT_DIR = _find_satellite_tracker_dir()
 _FORECAST_PATH = _SAT_DIR / "forecast_15day.json"
 
 
+def _tle_freshness() -> dict:
+    """Median/oldest TLE age (days) + count of stale (>14 d) TLEs in the fleet
+    cache — so the UI can warn when positions are propagated from old elements."""
+    try:
+        sys.path.insert(0, _SAT_DIR) if _SAT_DIR not in sys.path else None
+        from aoi_forecast import tle_age_days, MAX_TLE_AGE_DAYS
+        with open(_forecast_tle_cache_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        ages = []
+        for v in d.values():
+            if isinstance(v, dict) and v.get("line1"):
+                a = tle_age_days(v["line1"])
+                if a is not None and a >= 0:
+                    ages.append(a)
+        if not ages:
+            return {"median_days": None, "max_days": None, "stale_count": 0, "total": 0}
+        ages.sort()
+        return {"median_days": round(ages[len(ages) // 2], 1),
+                "max_days": round(ages[-1], 1),
+                "stale_count": sum(1 for a in ages if a > MAX_TLE_AGE_DAYS),
+                "total": len(ages)}
+    except Exception:
+        return {"median_days": None, "max_days": None, "stale_count": 0, "total": 0}
+
+
 def _load_forecast() -> dict | None:
     if not _FORECAST_PATH.is_file():
         return None
@@ -1476,8 +1501,16 @@ def get_blind_windows():
 
 _SUMMARY_CACHE = {"mtime": None, "data": None}
 
+def _lean_summary(res: dict) -> dict:
+    """Drop the heavy per-pass `sched` (≈85% of the payload) for a fast first
+    load. The app fetches this lean version, renders, then lazily pulls the full
+    summary in the background for the blind-calendar hover + timetable export."""
+    days = [{k: v for k, v in d.items() if k != "sched"} for d in res.get("days", [])]
+    out = dict(res); out["days"] = days; out["lean"] = True
+    return out
+
 @app.get("/api/forecast/summary")
-def forecast_summary():
+def forecast_summary(lean: int = Query(0)):
     """Compact, pre-aggregated forecast for lightweight clients (the intel-theme
     web dashboard AND a future Android app). Server-side aggregation keeps the
     payload tiny vs. the multi-MB raw /api/forecast. Per day it returns pass
@@ -1492,7 +1525,7 @@ def forecast_summary():
     except OSError:
         _mt = None
     if _mt is not None and _SUMMARY_CACHE["mtime"] == _mt and _SUMMARY_CACHE["data"] is not None:
-        return _SUMMARY_CACHE["data"]
+        return _lean_summary(_SUMMARY_CACHE["data"]) if lean else _SUMMARY_CACHE["data"]
 
     fc = _load_forecast()
     if fc is None:
@@ -1624,11 +1657,12 @@ def forecast_summary():
         "start_date": fc.get("start_date"), "end_date": fc.get("end_date"),
         "satellite_count": fc.get("satellite_count"),
         "days": days_out, "countries": cty, "upcoming": upcoming[:400],
+        "tle_freshness": _tle_freshness(),
     }
     if _mt is not None:
         _SUMMARY_CACHE["mtime"] = _mt
         _SUMMARY_CACHE["data"] = _result
-    return _result
+    return _lean_summary(_result) if lean else _result
 
 
 # ── Mobile app auth gate ──────────────────────────────────────────────────────
@@ -1682,18 +1716,14 @@ def _mobile_creds():
     return "atlas", "change-me-now"
 
 def _check_basic(authorization: str):
-    """Return the id if the Basic-auth header matches mobile_auth.json, else 401."""
-    want_id, want_pw = _mobile_creds()
-    if not authorization or not authorization.lower().startswith("basic "):
-        raise HTTPException(401, detail="login required", headers={"WWW-Authenticate": "Basic"})
-    try:
-        raw = _base64.b64decode(authorization.split(" ", 1)[1]).decode("utf-8")
-        got_id, got_pw = raw.split(":", 1)
-    except Exception:
-        raise HTTPException(401, detail="bad credentials", headers={"WWW-Authenticate": "Basic"})
-    if got_id != want_id or got_pw != want_pw:
-        raise HTTPException(401, detail="wrong id or password", headers={"WWW-Authenticate": "Basic"})
-    return got_id
+    """Password removed for now — auth is open. (Kept as a no-op so all callers
+    still work; re-enable by restoring the credential check below.)"""
+    return "open"
+    # --- disabled auth (restore to re-enable password) ---
+    # want_id, want_pw = _mobile_creds()
+    # if not authorization or not authorization.lower().startswith("basic "):
+    #     raise HTTPException(401, detail="login required", headers={"WWW-Authenticate": "Basic"})
+    # ...
 
 
 @app.get("/api/mobile/login", include_in_schema=False)
@@ -1703,10 +1733,10 @@ def mobile_login(authorization: str = Header(default="")):
 
 
 @app.get("/api/mobile/summary", include_in_schema=False)
-def mobile_summary(authorization: str = Header(default="")):
-    """Same 15-day summary as /api/forecast/summary, but LOCKED behind the login."""
+def mobile_summary(lean: int = Query(0), authorization: str = Header(default="")):
+    """Same 15-day summary as /api/forecast/summary (auth open for now)."""
     _check_basic(authorization)
-    return forecast_summary()
+    return forecast_summary(lean=lean)
 
 
 # ── On-demand forecast recompute (mobile "Refresh Forecast") ──────────────────
@@ -1877,6 +1907,35 @@ def get_forecast_changes():
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         raise HTTPException(500, detail="forecast_changes.json unreadable.")
+
+
+# ── Live analysis modals (Accuracy / Maneuver) — real data from the desktop
+# pipeline's JSON, so the app shows real numbers instead of sample data. On the
+# cloud (files absent) these return available:false so the UI shows an honest
+# "computed on the desktop pipeline" note rather than fake figures.
+def _read_json_or(available_key: str, path):
+    if not path.is_file():
+        return {"available": False}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data["available"] = True
+        return data
+    except (OSError, json.JSONDecodeError):
+        return {"available": False, "error": "unreadable"}
+
+
+@app.get("/api/forecast/accuracy")
+def get_forecast_accuracy():
+    """Prediction-accuracy track record (predicted vs actual over lookback days)."""
+    return _read_json_or("accuracy", _SAT_DIR / "accuracy_track_record.json")
+
+
+@app.get("/api/forecast/maneuvers")
+def get_forecast_maneuvers():
+    """Detected orbit-change maneuvers + post-maneuver imaging-risk sites."""
+    return _read_json_or("maneuvers", _SAT_DIR / "maneuver_report.json")
 
 
 # ── Static-file serving for the bundled SPA ─────────────────────────────
