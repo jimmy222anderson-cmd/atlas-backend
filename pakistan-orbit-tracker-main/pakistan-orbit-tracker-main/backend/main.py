@@ -1474,6 +1474,8 @@ def get_blind_windows():
     }
 
 
+_SUMMARY_CACHE = {"mtime": None, "data": None}
+
 @app.get("/api/forecast/summary")
 def forecast_summary():
     """Compact, pre-aggregated forecast for lightweight clients (the intel-theme
@@ -1482,6 +1484,16 @@ def forecast_summary():
     counts (india/other/optical/sar/military), blind minutes + longest gap, and
     per-sensor OBSERVED windows (PKT minutes) for the OPT/SAR blind calendar;
     plus per-country daily counts, an 'upcoming' pass list, and fleet totals."""
+    # Cache the aggregated summary keyed by the forecast file's mtime: reading +
+    # re-aggregating the large forecast_15day.json on EVERY request was the 3-5 s
+    # "refresh" cost. Now it recomputes only when the forecast actually changes.
+    try:
+        _mt = _FORECAST_PATH.stat().st_mtime if _FORECAST_PATH.is_file() else None
+    except OSError:
+        _mt = None
+    if _mt is not None and _SUMMARY_CACHE["mtime"] == _mt and _SUMMARY_CACHE["data"] is not None:
+        return _SUMMARY_CACHE["data"]
+
     fc = _load_forecast()
     if fc is None:
         raise HTTPException(404, detail="No forecast available. Run Satellite_Tracker/run_daily.py.")
@@ -1607,12 +1619,16 @@ def forecast_summary():
     cty = {k: {"sats": len(v["sats"]), "opt": len(v["optset"]), "sar": len(v["sarset"]),
                "mil": len(v["milset"]), "daily": v["daily"]} for k, v in cty.items()}
 
-    return {
+    _result = {
         "generated_at": fc.get("generated_at"),
         "start_date": fc.get("start_date"), "end_date": fc.get("end_date"),
         "satellite_count": fc.get("satellite_count"),
         "days": days_out, "countries": cty, "upcoming": upcoming[:400],
     }
+    if _mt is not None:
+        _SUMMARY_CACHE["mtime"] = _mt
+        _SUMMARY_CACHE["data"] = _result
+    return _result
 
 
 # ── Mobile app auth gate ──────────────────────────────────────────────────────
