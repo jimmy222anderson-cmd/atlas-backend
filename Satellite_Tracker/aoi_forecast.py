@@ -274,6 +274,7 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
 
     return {
         "aoi": poly,
+        "engine": "aoi-v3-persat-tilt+daylight",   # version marker to confirm deploy
         "generated_at": datetime.datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "days": out_days,
         "satellite_count": len(sats),
