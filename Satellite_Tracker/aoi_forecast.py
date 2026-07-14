@@ -20,7 +20,7 @@ from datetime import timezone, timedelta
 
 # Reuse the exact SGP4 propagation the Pakistan engine uses, so AOI numbers are
 # consistent with the main forecast.
-from forecast_15day import propagate
+from forecast_15day import propagate, _solar_elevation_deg
 
 # Two-phase scan: a cheap COARSE pass locates when a satellite is near the AOI
 # (its wide tilt bbox is reliably caught at 2-min steps), then a FINE pass only
@@ -167,6 +167,9 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
     blind-calendar + chart renderers can display it unchanged.
     """
     bbox = poly_bbox(poly)
+    # AOI centroid — used for the daylight test (optical can't image in the dark).
+    c_lat = sum(p[0] for p in poly) / len(poly)
+    c_lon = sum(p[1] for p in poly) / len(poly)
     if start_date is None:
         start_date = (datetime.datetime.now(timezone.utc) + timedelta(hours=5)).date()
 
@@ -208,16 +211,26 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
                 xm = _pkt_min(a["exit"])
                 if xm < em:
                     xm = 1440
+                # Daylight filter (matches the main forecast): OPTICAL sensors can
+                # only image in sunlight, so drop optical passes whose midpoint is
+                # after dark. SAR (radar) images day AND night — always kept.
+                if not is_sar:
+                    mid = a["entry"] + (a["exit"] - a["entry"]) / 2
+                    if _solar_elevation_deg(c_lat, c_lon, mid) <= 0.0:
+                        continue
                 is_over = a["type"] == "overhead"
                 if is_over:
                     n_over += 1
-                    over_intervals.append((em, xm))
-                    (sar_iv if is_sar else opt_iv).append((em, xm))
-                    (sar_pur if is_sar else opt_cyan).append(em)
                 else:
                     n_tilt += 1
                 n_sar += 1 if is_sar else 0
                 n_opt += 0 if is_sar else 1
+                # EVERY kept pass (overhead OR tilt-range) is a coverage window —
+                # the satellite can image the AOI, so it counts against blind time,
+                # exactly like the Pakistan forecast.
+                over_intervals.append((em, xm))
+                (sar_iv if is_sar else opt_iv).append((em, xm))
+                (sar_pur if is_sar else opt_cyan).append(em)
                 seen.add(s.get("norad"))
                 sched.append({
                     "t": em, "e": xm,
