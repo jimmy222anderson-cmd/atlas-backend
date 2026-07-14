@@ -20,7 +20,7 @@ from datetime import timezone, timedelta
 
 # Reuse the exact SGP4 propagation the Pakistan engine uses, so AOI numbers are
 # consistent with the main forecast.
-from forecast_15day import propagate, _solar_elevation_deg
+from forecast_15day import propagate, _solar_elevation_deg, _per_sat_buffer_deg
 
 # Two-phase scan: a cheap COARSE pass locates when a satellite is near the AOI
 # (its wide tilt bbox is reliably caught at 2-min steps), then a FINE pass only
@@ -60,11 +60,15 @@ def poly_bbox(poly: list[list[float]]) -> tuple[float, float, float, float]:
 
 # ── pass detection over the polygon ──────────────────────────────────────────
 def _sat_day_passes(line1: str, line2: str, day: datetime.date,
-                    poly: list[list[float]], bbox: tuple) -> list[dict]:
-    """All overhead / tilt-range arcs for one satellite over one PKT day."""
+                    poly: list[list[float]], bbox: tuple,
+                    buf_lat: float = TILT_BUF_LAT,
+                    buf_lon: float = TILT_BUF_LON) -> list[dict]:
+    """All overhead / tilt-range arcs for one satellite over one PKT day.
+    buf_lat/buf_lon = THIS satellite's tilt standoff in degrees, so a sat that
+    can slew 500 km off-nadir covers the AOI from 500 km away."""
     lat_min, lat_max, lon_min, lon_max = bbox
-    tb_lat0, tb_lat1 = lat_min - TILT_BUF_LAT, lat_max + TILT_BUF_LAT
-    tb_lon0, tb_lon1 = lon_min - TILT_BUF_LON, lon_max + TILT_BUF_LON
+    tb_lat0, tb_lat1 = lat_min - buf_lat, lat_max + buf_lat
+    tb_lon0, tb_lon1 = lon_min - buf_lon, lon_max + buf_lon
     # PKT day = UTC window shifted back 5 h (same convention as forecast_15day).
     start = (datetime.datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
              - timedelta(hours=5))
@@ -173,11 +177,20 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
     if start_date is None:
         start_date = (datetime.datetime.now(timezone.utc) + timedelta(hours=5)).date()
 
+    # Per-satellite tilt buffer (its standoff_km → degrees). A high-tilt sat can
+    # image the AOI from far off its ground track (e.g. 500 km).
+    buf_map = {}
+    for s in sats:
+        try:
+            buf_map[s.get("norad")] = _per_sat_buffer_deg(s.get("norad"))
+        except Exception:
+            buf_map[s.get("norad")] = (TILT_BUF_LAT, TILT_BUF_LON)
+    max_buf_lat = max((b[0] for b in buf_map.values()), default=TILT_BUF_LAT)
+
     # Inclination cull: a satellite of inclination i only reaches latitudes up to
-    # ±(i if i<=90 else 180-i). If it can't even reach the AOI's nearest-equator
-    # edge (minus the tilt buffer), its ground track never enters — skip it. This
-    # drops the whole SGP4 loop for those sats (big win for a mid/high-lat AOI).
-    aoi_min_abs_lat = min(abs(bbox[0]), abs(bbox[1])) - TILT_BUF_LAT
+    # ±(i if i<=90 else 180-i). If it can't reach the AOI's nearest-equator edge
+    # even with the LARGEST tilt standoff, its coverage never touches — skip it.
+    aoi_min_abs_lat = min(abs(bbox[0]), abs(bbox[1])) - max_buf_lat
     fleet = []
     for s in sats:
         try:
@@ -201,8 +214,9 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
         seen = set()
 
         for s in sats:
+            _bl, _bo = buf_map.get(s.get("norad"), (TILT_BUF_LAT, TILT_BUF_LON))
             try:
-                arcs = _sat_day_passes(s["line1"], s["line2"], day, poly, bbox)
+                arcs = _sat_day_passes(s["line1"], s["line2"], day, poly, bbox, _bl, _bo)
             except Exception:
                 continue
             is_sar = "SAR" in str(s.get("sensor", "")).upper()
