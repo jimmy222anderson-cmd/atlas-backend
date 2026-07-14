@@ -1965,3 +1965,5 @@ if _STATIC_DIR:
     print(f"[BACKEND] SPA mounted from {_STATIC_DIR}")
 else:
     print("[BACKEND] No static SPA bundle found — dev mode (Vite on :8080 expected)")
+
+# deploy-trigger: refresh AOI engine (aoi_forecast lives outside rootDir)
