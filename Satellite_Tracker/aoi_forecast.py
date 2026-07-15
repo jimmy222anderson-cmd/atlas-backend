@@ -301,6 +301,7 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
                     "c": s.get("country") or "—",
                     "s": "SAR" if is_sar else "OPT",
                     "r": s.get("resolution_m"),
+                    "norad": s.get("norad"),   # so the AOI upcoming list can jump to the live tracker
                 })
 
         blind = _blind_windows(over_intervals)
@@ -326,7 +327,7 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
 
     return {
         "aoi": poly,
-        "engine": "aoi-v5-country-split",          # version marker to confirm deploy
+        "engine": "aoi-v6-norad",                  # version marker to confirm deploy
         "generated_at": datetime.datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "days": out_days,
         "satellite_count": len(sats),

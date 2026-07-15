@@ -2034,4 +2034,4 @@ else:
 
 # deploy-trigger: refresh AOI engine (aoi_forecast lives outside rootDir)
 
-# redeploy: AOI engine v5 country/sensor split (2026-07-15)
+# redeploy: AOI engine v6 (norad in sched for upcoming-list tracking)
