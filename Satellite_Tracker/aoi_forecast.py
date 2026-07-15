@@ -244,6 +244,11 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
         opt_cyan, sar_pur = [], []
         sched = []
         n_over = n_tilt = n_opt = n_sar = 0
+        # Country / sensor breakdowns so the AOI KPI cards can mirror the main
+        # header cards (India passes · SAR passes+military · other countries).
+        n_mil = 0
+        n_ind_over = n_ind_tilt = 0
+        n_oth_over = n_oth_tilt = 0
         seen = set()
 
         for s in sats:
@@ -252,7 +257,10 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
                 arcs = _sat_day_passes(s["line1"], s["line2"], day, poly, bbox, _bl, _bo)
             except Exception:
                 continue
-            is_sar = "SAR" in str(s.get("sensor", "")).upper()
+            _sensor_u = str(s.get("sensor", "")).upper()
+            is_sar = "SAR" in _sensor_u
+            is_mil = "MIL" in _sensor_u or "MILITARY" in str(s.get("sensor_category", "")).upper()
+            is_india = "INDIA" in str(s.get("country", "")).upper()
             for a in arcs:
                 em = _pkt_min(a["entry"])
                 xm = _pkt_min(a["exit"])
@@ -272,6 +280,13 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
                     n_tilt += 1
                 n_sar += 1 if is_sar else 0
                 n_opt += 0 if is_sar else 1
+                n_mil += 1 if is_mil else 0
+                if is_india:
+                    n_ind_over += 1 if is_over else 0
+                    n_ind_tilt += 0 if is_over else 1
+                else:
+                    n_oth_over += 1 if is_over else 0
+                    n_oth_tilt += 0 if is_over else 1
                 # EVERY kept pass (overhead OR tilt-range) is a coverage window —
                 # the satellite can image the AOI, so it counts against blind time,
                 # exactly like the Pakistan forecast.
@@ -294,7 +309,11 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
         out_days.append({
             "date": day.strftime("%Y-%m-%d"),
             "over": n_over, "tilt": n_tilt,
-            "opt": n_opt, "sar": n_sar, "mil": 0,
+            "opt": n_opt, "sar": n_sar, "mil": n_mil,
+            # India vs other-country pass counts (each split overhead/tilt), so
+            # the AOI KPI cards match the main dashboard header cards.
+            "ind_over": n_ind_over, "ind_tilt": n_ind_tilt,
+            "oth_over": n_oth_over, "oth_tilt": n_oth_tilt,
             "blind_min": blind_min, "longest_gap": longest,
             "sats": len(seen),
             # blind-calendar barcode fields (minutes)
@@ -307,7 +326,7 @@ def compute_aoi_forecast(poly: list[list[float]], sats: list[dict],
 
     return {
         "aoi": poly,
-        "engine": "aoi-v4-tle-fresh",              # version marker to confirm deploy
+        "engine": "aoi-v5-country-split",          # version marker to confirm deploy
         "generated_at": datetime.datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "days": out_days,
         "satellite_count": len(sats),

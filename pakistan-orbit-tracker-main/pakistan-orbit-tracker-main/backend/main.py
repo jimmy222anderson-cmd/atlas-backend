@@ -2033,3 +2033,5 @@ else:
     print("[BACKEND] No static SPA bundle found — dev mode (Vite on :8080 expected)")
 
 # deploy-trigger: refresh AOI engine (aoi_forecast lives outside rootDir)
+
+# redeploy: AOI engine v5 country/sensor split (2026-07-15)
